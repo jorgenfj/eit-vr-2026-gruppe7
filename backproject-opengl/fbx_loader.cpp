@@ -73,7 +73,7 @@ static void collectMeshEdges(const aiScene* scene,
         collectMeshEdges(scene, node->mChildren[i], global, verts);
 }
 
-// ── Mesh triangle collection (textured) ─────────────────────────────────────
+// ── Mesh triangle collection ─────────────────────────────────────────────────
 
 static void collectMeshTriangles(const aiScene* scene,
                                  const aiNode* node,
@@ -91,7 +91,7 @@ static void collectMeshTriangles(const aiScene* scene,
 
         for (unsigned fi = 0; fi < mesh->mNumFaces; ++fi) {
             const aiFace& f = mesh->mFaces[fi];
-            if (f.mNumIndices != 3) continue; // skip non-triangles
+            if (f.mNumIndices != 3) continue;
 
             for (unsigned vi = 0; vi < 3; ++vi) {
                 unsigned idx = f.mIndices[vi];
@@ -121,39 +121,37 @@ static void collectMeshTriangles(const aiScene* scene,
         collectMeshTriangles(scene, node->mChildren[i], global, tris);
 }
 
-// ── Embedded texture extraction ─────────────────────────────────────────────
+// ── Texture path resolution ───────────────────────────────────────────────────
+// The FBX may reference a texture with an absolute Windows path.
+// We extract just the filename and look for it next to the FBX file.
 
-static void extractEmbeddedTexture(const aiScene* scene, SceneData& out)
+static void resolveTexturePath(const aiScene* scene,
+                               const std::string& fbxPath,
+                               SceneData& out)
 {
     if (scene->mNumMaterials == 0) return;
-
-    // Look for diffuse texture on the first material
     const aiMaterial* mat = scene->mMaterials[0];
     if (mat->GetTextureCount(aiTextureType_DIFFUSE) == 0) return;
 
     aiString texPath;
     mat->GetTexture(aiTextureType_DIFFUSE, 0, &texPath);
+    std::string raw = texPath.C_Str();
 
-    const aiTexture* tex = scene->GetEmbeddedTexture(texPath.C_Str());
-    if (!tex) return;
+    // Extract just the filename (handles both / and \ separators)
+    size_t slash = raw.find_last_of("/\\");
+    std::string filename = (slash != std::string::npos) ? raw.substr(slash + 1) : raw;
 
-    if (tex->mHeight == 0) {
-        // Compressed format (JPEG/PNG) – mWidth is byte count
-        const auto* bytes = reinterpret_cast<const unsigned char*>(tex->pcData);
-        out.texture.data.assign(bytes, bytes + tex->mWidth);
-        out.texture.formatHint = tex->achFormatHint;
-        std::cout << "  Embedded texture: " << tex->mWidth
-                  << " bytes (" << tex->achFormatHint << ")\n";
-    } else {
-        // Uncompressed ARGB8888 – we won't handle this for now
-        std::cout << "  Embedded texture is uncompressed "
-                  << tex->mWidth << "x" << tex->mHeight << " (not loaded)\n";
-    }
+    // Build path relative to the FBX directory
+    size_t dirEnd = fbxPath.find_last_of("/\\");
+    std::string dir = (dirEnd != std::string::npos) ? fbxPath.substr(0, dirEnd + 1) : "./";
+    out.texturePath = dir + filename;
+
+    std::cout << "  Texture path: " << out.texturePath << "\n";
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-bool loadFbx(const std::string& path, SceneData& out)
+bool loadFbx(const std::string& path, SceneData& out, float meshScale)
 {
     Assimp::Importer importer;
     const aiScene* scene = importer.ReadFile(
@@ -165,14 +163,72 @@ bool loadFbx(const std::string& path, SceneData& out)
         return false;
     }
 
+    // ── Auto-detect unit scale from FBX metadata ─────────────────────────
+    // FBX stores UnitScaleFactor = centimetres-per-unit.
+    //   1.0  → mesh is in centimetres  → scale = 0.01 to reach metres
+    //   100.0 → mesh is in metres       → scale = 1.0
+    //   0.1  → mesh is in millimetres  → scale = 0.001
+    // If the user passed an explicit meshScale (!= 1.0) that overrides auto.
+    if (meshScale == 1.0f && scene->mMetaData) {
+        double unitScaleFactor = 0.0;
+        bool gotUSF = false;
+
+        // Assimp may store the value as double, float, or int — try each
+        {
+            double dv = 0; float fv = 0; int iv = 0;
+            if (scene->mMetaData->Get("UnitScaleFactor", dv))
+                { unitScaleFactor = dv; gotUSF = true; }
+            else if (scene->mMetaData->Get("UnitScaleFactor", fv))
+                { unitScaleFactor = fv; gotUSF = true; }
+            else if (scene->mMetaData->Get("UnitScaleFactor", iv))
+                { unitScaleFactor = iv; gotUSF = true; }
+        }
+
+        if (gotUSF)
+            std::cout << "  FBX UnitScaleFactor=" << unitScaleFactor << "\n";
+        else
+            std::cout << "  FBX UnitScaleFactor not found in metadata\n";
+
+        // UnitScaleFactor is cm/unit.  Divide by 100 to get metres/unit.
+        if (gotUSF && unitScaleFactor > 0.0)
+            meshScale = static_cast<float>(unitScaleFactor / 100.0);
+
+        if (meshScale != 1.0f)
+            std::cout << "  Auto-detected mesh scale (cm→m): " << meshScale << "\n";
+        else
+            std::cout << "  Mesh appears to already be in metres (scale=1.0)\n";
+    }
+
     aiMatrix4x4 identity;
     collectCameraNodes   (scene, scene->mRootNode, identity, out.cameraPoses);
     collectMeshEdges     (scene, scene->mRootNode, identity, out.meshEdges);
     collectMeshTriangles (scene, scene->mRootNode, identity, out.meshTriangles);
-    extractEmbeddedTexture(scene, out);
+    resolveTexturePath(scene, path, out);
+
+    // ── Print mesh bounding box ───────────────────────────────────────────
+    if (!out.meshTriangles.empty()) {
+        glm::vec3 bmin( 1e30f), bmax(-1e30f);
+        for (const auto& v : out.meshTriangles) {
+            bmin = glm::min(bmin, v.pos);
+            bmax = glm::max(bmax, v.pos);
+        }
+        glm::vec3 sz = bmax - bmin;
+        std::cout << "  Mesh AABB (before scale): size "
+                  << sz.x << " x " << sz.y << " x " << sz.z << "\n";
+    }
+
+    // ── Apply scale to mesh AND camera positions (keeps them aligned) ────
+    if (meshScale != 1.0f) {
+        for (auto& v : out.meshTriangles) v.pos *= meshScale;
+        for (auto& v : out.meshEdges)     v.pos *= meshScale;
+        for (auto& cp : out.cameraPoses)
+            cp.transform[3] = glm::vec4(glm::vec3(cp.transform[3]) * meshScale, 1.f);
+        std::cout << "  Applied scale " << meshScale << " to mesh and cameras.\n";
+    }
 
     std::cout << "Loaded " << out.cameraPoses.size() << " camera poses, "
               << scene->mNumMeshes << " meshes, "
-              << out.meshTriangles.size() / 3 << " triangles.\n";
+              << out.meshTriangles.size() / 3 << " triangles"
+              << " (effective scale=" << meshScale << ").\n";
     return true;
 }

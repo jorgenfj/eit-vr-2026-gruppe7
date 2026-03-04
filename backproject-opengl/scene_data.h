@@ -18,24 +18,19 @@ struct Vertex {
     glm::vec3 col;
 };
 
-/// Vertex for textured mesh triangles (pos + normal + UV).
+/// Vertex for mesh triangles (pos + normal + UV).
 struct MeshVertex {
     glm::vec3 pos;
     glm::vec3 normal;
     glm::vec2 uv;
 };
 
-/// Raw embedded texture data (compressed JPEG/PNG bytes from FBX).
-struct EmbeddedTexture {
-    std::vector<unsigned char> data;   ///< compressed image bytes
-    std::string formatHint;            ///< e.g. "jpg", "png"
-};
-
 /// SIMPLE_RADIAL camera intrinsics (COLMAP convention).
 struct Intrinsics {
     int   width  = 0;
     int   height = 0;
-    float f  = 0;   ///< focal length (pixels)
+    float fx = 0;   ///< focal length x (pixels)
+    float fy = 0;   ///< focal length y (pixels)
     float cx = 0;   ///< principal point x
     float cy = 0;   ///< principal point y
     float k1 = 0;   ///< radial distortion
@@ -50,10 +45,18 @@ struct ArucoDetection {
     float       centerY;    ///< pixel y
 };
 
+/// A single crack pixel detection in a frame (from crack_pixels.csv).
+struct CrackPixel {
+    int         frame;      ///< matches frame number in COLMAP images.txt filename (e.g. frame_23 → 23)
+    std::string filename;   ///< e.g. "frame_23.png"
+    float       x;          ///< pixel x
+    float       y;          ///< pixel y
+};
+
 /// Everything we extract from the FBX file.
 struct SceneData {
     std::vector<CameraPose> cameraPoses;
     std::vector<Vertex>     meshEdges;      ///< wireframe edges (GL_LINES pairs)
     std::vector<MeshVertex> meshTriangles;  ///< filled triangles (GL_TRIANGLES)
-    EmbeddedTexture         texture;        ///< diffuse texture
+    std::string             texturePath;    ///< path to the diffuse texture file (may be empty)
 };

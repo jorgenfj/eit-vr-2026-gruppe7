@@ -4,5 +4,8 @@
 #include <string>
 
 /// Load an FBX (or any Assimp-supported) file and extract camera poses and
-/// mesh wireframe edges.  Returns true on success.
-bool loadFbx(const std::string& path, SceneData& out);
+/// mesh wireframe edges.
+/// meshScale is applied uniformly to all vertex positions so you can match
+/// the mesh's unit system to the COLMAP camera coordinates (metres).
+/// Default 1.0 = no scaling.  Pass e.g. 0.001 to convert mm → m.
+bool loadFbx(const std::string& path, SceneData& out, float meshScale = 1.0f);

@@ -40,6 +40,7 @@ GpuMesh uploadTriangles(const std::vector<MeshVertex>& verts);
 
 /// Decode an embedded compressed texture and upload to GL.  Returns texture id.
 GLuint loadTextureFromMemory(const unsigned char* data, int length);
+GLuint loadTextureFromFile(const std::string& path);
 
 /// Compile + link the default colour shader (for lines).
 GLuint createProgram();
@@ -59,6 +60,10 @@ struct RenderData {
 
 /// Run the main render loop (blocks until the window is closed).
 void runRenderLoop(GLFWwindow* window, const RenderData& rd);
+
+/// Render a single frame (poll events, draw, swap buffers).
+/// Returns false when the window should close.
+bool renderFrame(GLFWwindow* window, const RenderData& rd);
 
 /// Clean-up GPU resources.
 void cleanup(GLFWwindow* window, const RenderData& rd);

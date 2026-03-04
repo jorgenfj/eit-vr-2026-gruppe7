@@ -93,7 +93,7 @@ glm::mat4 OrbitCamera::viewMatrix() const {
 static void keyCb(GLFWwindow* w, int key, int /*scancode*/, int action, int /*mods*/) {
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
         glfwSetWindowShouldClose(w, true);
-    if (key == GLFW_KEY_R && action == GLFW_PRESS) {
+    if (key == GLFW_KEY_B && action == GLFW_PRESS) {
         gShowRays = !gShowRays;
         std::cout << "Backprojection rays: " << (gShowRays ? "ON" : "OFF") << "\n";
     }
@@ -101,7 +101,7 @@ static void keyCb(GLFWwindow* w, int key, int /*scancode*/, int action, int /*mo
 
 static void scrollCb(GLFWwindow*, double, double yoff) {
     gCam.distance *= (yoff > 0) ? 0.9f : 1.1f;
-    gCam.distance = std::clamp(gCam.distance, 0.5f, 500.f);
+    gCam.distance = std::clamp(gCam.distance, 0.5f, 5000.f);
 }
 
 static void mouseButtonCb(GLFWwindow* w, int btn, int act, int) {
@@ -293,76 +293,114 @@ GLuint loadTextureFromMemory(const unsigned char* data, int length) {
     return tex;
 }
 
-// ── Render loop ─────────────────────────────────────────────────────────────
-void runRenderLoop(GLFWwindow* window, const RenderData& rd) {
-    GLint lineMvpLoc = glGetUniformLocation(rd.lineProg, "uMVP");
+GLuint loadTextureFromFile(const std::string& path) {
+    int w, h, ch;
+    unsigned char* pixels = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    if (!pixels) {
+        std::cerr << "Cannot load texture '" << path << "': "
+                  << stbi_failure_reason() << "\n";
+        return 0;
+    }
+    std::cout << "Loaded texture: " << path << " (" << w << "x" << h
+              << ", " << ch << " channels)\n";
 
-    GLint meshMvpLoc   = glGetUniformLocation(rd.meshProg, "uMVP");
-    GLint meshModelLoc = glGetUniformLocation(rd.meshProg, "uModel");
-    GLint meshLightLoc = glGetUniformLocation(rd.meshProg, "uLightDir");
-    GLint meshViewLoc  = glGetUniformLocation(rd.meshProg, "uViewPos");
-    GLint meshTexLoc   = glGetUniformLocation(rd.meshProg, "uDiffuse");
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glGenerateMipmap(GL_TEXTURE_2D);
 
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    stbi_image_free(pixels);
+    return tex;
+}
+
+// Shared GL state initialised on first call
+static bool gGlStateInit = false;
+static GLint gLineMvpLoc  = -1;
+static GLint gMeshMvpLoc  = -1;
+static GLint gMeshModelLoc = -1;
+static GLint gMeshLightLoc = -1;
+static GLint gMeshViewLoc  = -1;
+static GLint gMeshTexLoc   = -1;
+static glm::vec3 gLightDir;
+
+static void initGlState(const RenderData& rd) {
+    if (gGlStateInit) return;
+    gLineMvpLoc   = glGetUniformLocation(rd.lineProg,  "uMVP");
+    gMeshMvpLoc   = glGetUniformLocation(rd.meshProg,  "uMVP");
+    gMeshModelLoc = glGetUniformLocation(rd.meshProg,  "uModel");
+    gMeshLightLoc = glGetUniformLocation(rd.meshProg,  "uLightDir");
+    gMeshViewLoc  = glGetUniformLocation(rd.meshProg,  "uViewPos");
+    gMeshTexLoc   = glGetUniformLocation(rd.meshProg,  "uDiffuse");
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_MULTISAMPLE);
     glLineWidth(1.5f);
     glClearColor(0.12f, 0.12f, 0.14f, 1.f);
+    gLightDir = glm::normalize(glm::vec3(0.4f, 1.0f, 0.6f));
+    gGlStateInit = true;
+}
+
+bool renderFrame(GLFWwindow* window, const RenderData& rd) {
+    initGlState(rd);
+
+    glfwPollEvents();
+    if (glfwWindowShouldClose(window)) return false;
+
+    int w, h;
+    glfwGetFramebufferSize(window, &w, &h);
+    if (h == 0) h = 1;
+    glViewport(0, 0, w, h);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glm::mat4 identity(1.f);
-    glm::vec3 lightDir = glm::normalize(glm::vec3(0.4f, 1.0f, 0.6f));
+    glm::mat4 proj = glm::perspective(glm::radians(55.f), (float)w / h, 0.01f, 5000.f);
+    glm::mat4 view = gCam.viewMatrix();
+    glm::mat4 mvp  = proj * view;
 
-    while (!glfwWindowShouldClose(window)) {
-        glfwPollEvents();
-
-        int w, h;
-        glfwGetFramebufferSize(window, &w, &h);
-        if (h == 0) h = 1;
-        glViewport(0, 0, w, h);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        glm::mat4 proj = glm::perspective(glm::radians(55.f),
-                                           (float)w / h, 0.1f, 500.f);
-        glm::mat4 view = gCam.viewMatrix();
-        glm::mat4 mvp  = proj * view;
-
-        // ── Draw textured mesh triangles ────────────────────────────────
-        if (rd.triangles.vertexCount > 0) {
-            glUseProgram(rd.meshProg);
-            glUniformMatrix4fv(meshMvpLoc,   1, GL_FALSE, glm::value_ptr(mvp));
-            glUniformMatrix4fv(meshModelLoc, 1, GL_FALSE, glm::value_ptr(identity));
-            glUniform3fv(meshLightLoc, 1, glm::value_ptr(lightDir));
-
-            // Camera position for specular (from orbit camera)
-            float cx = gCam.target.x + gCam.distance * cosf(gCam.pitch) * sinf(gCam.yaw);
-            float cy = gCam.target.y + gCam.distance * sinf(gCam.pitch);
-            float cz = gCam.target.z + gCam.distance * cosf(gCam.pitch) * cosf(gCam.yaw);
-            glm::vec3 camPos(cx, cy, cz);
-            glUniform3fv(meshViewLoc, 1, glm::value_ptr(camPos));
-
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, rd.diffuseTex);
-            glUniform1i(meshTexLoc, 0);
-
-            glBindVertexArray(rd.triangles.vao);
-            glDrawArrays(GL_TRIANGLES, 0, rd.triangles.vertexCount);
-        }
-
-        // ── Draw lines (grid, axes, frustums, trajectory) ──────────────
-        glUseProgram(rd.lineProg);
-        glUniformMatrix4fv(lineMvpLoc, 1, GL_FALSE, glm::value_ptr(mvp));
-        glBindVertexArray(rd.lines.vao);
-        glDrawArrays(GL_LINES, 0, rd.lines.vertexCount);
-
-        // ── Draw backprojection rays (toggle with R) ────────────────────
-        if (gShowRays && rd.rays.vertexCount > 0) {
-            glLineWidth(2.0f);
-            glBindVertexArray(rd.rays.vao);
-            glDrawArrays(GL_LINES, 0, rd.rays.vertexCount);
-            glLineWidth(1.5f);
-        }
-
-        glfwSwapBuffers(window);
+    // ── Draw textured mesh triangles ──────────────────────────────────────
+    if (rd.triangles.vertexCount > 0) {
+        glUseProgram(rd.meshProg);
+        glUniformMatrix4fv(gMeshMvpLoc,   1, GL_FALSE, glm::value_ptr(mvp));
+        glUniformMatrix4fv(gMeshModelLoc, 1, GL_FALSE, glm::value_ptr(identity));
+        glUniform3fv(gMeshLightLoc, 1, glm::value_ptr(gLightDir));
+        float cx = gCam.target.x + gCam.distance * cosf(gCam.pitch) * sinf(gCam.yaw);
+        float cy = gCam.target.y + gCam.distance * sinf(gCam.pitch);
+        float cz = gCam.target.z + gCam.distance * cosf(gCam.pitch) * cosf(gCam.yaw);
+        glm::vec3 camPos(cx, cy, cz);
+        glUniform3fv(gMeshViewLoc, 1, glm::value_ptr(camPos));
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, rd.diffuseTex);
+        glUniform1i(gMeshTexLoc, 0);
+        glBindVertexArray(rd.triangles.vao);
+        glDrawArrays(GL_TRIANGLES, 0, rd.triangles.vertexCount);
     }
+
+    // ── Draw lines (axes, frustums, trajectory) ───────────────────────────
+    glUseProgram(rd.lineProg);
+    glUniformMatrix4fv(gLineMvpLoc, 1, GL_FALSE, glm::value_ptr(mvp));
+    glBindVertexArray(rd.lines.vao);
+    glDrawArrays(GL_LINES, 0, rd.lines.vertexCount);
+
+    // ── Draw backprojection rays (toggle with R) ──────────────────────────
+    if (gShowRays && rd.rays.vertexCount > 0) {
+        glLineWidth(2.0f);
+        glBindVertexArray(rd.rays.vao);
+        glDrawArrays(GL_LINES, 0, rd.rays.vertexCount);
+        glLineWidth(1.5f);
+    }
+
+    glfwSwapBuffers(window);
+    return true;
+}
+
+void runRenderLoop(GLFWwindow* window, const RenderData& rd) {
+    while (renderFrame(window, rd)) {}
 }
 
 // ── Cleanup ─────────────────────────────────────────────────────────────────
@@ -383,3 +421,4 @@ void cleanup(GLFWwindow* window, const RenderData& rd) {
     glfwDestroyWindow(window);
     glfwTerminate();
 }
+
