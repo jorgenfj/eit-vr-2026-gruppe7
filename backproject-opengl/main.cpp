@@ -2,6 +2,7 @@
 // backproject-opengl: Visualise COLMAP camera poses in an OpenGL window
 // ============================================================================
 #include "fbx_loader.h"
+#include "fbx_exporter.h"
 #include "scene_geometry.h"
 #include "backproject.h"
 #include "renderer.h"
@@ -41,7 +42,9 @@ int main(int argc, char* argv[])
         if (!p.is_regular_file()) continue;
         auto ext = p.path().extension().string();
         for (auto& c : ext) c = std::tolower((unsigned char)c);
-        if (ext == ".fbx" && fbxPath.empty())
+        // Skip our own exported file so we always load the original
+        std::string stem = p.path().stem().string();
+        if (ext == ".fbx" && fbxPath.empty() && stem != "backprojected")
             fbxPath = p.path().string();
         if ((ext == ".png" || ext == ".jpg" || ext == ".jpeg") && texturePath.empty())
             texturePath = p.path().string();
@@ -135,6 +138,8 @@ int main(int argc, char* argv[])
     // ── Run render loop ───────────────────────────────────────────────────
     // Once the background thread finishes we re-upload the ray VBO.
     bool raysUploaded = false;
+    std::vector<Vertex> savedRayVerts;      // kept for FBX export
+    std::vector<Vertex> savedOutlineVerts;  // kept for FBX export
 
     while (!glfwWindowShouldClose(window)) {
         // Check if ray casting has finished
@@ -150,6 +155,7 @@ int main(int argc, char* argv[])
                 glDeleteVertexArrays(1, &rd.rays.vao);
             }
             rd.rays = uploadLines(result.rays);
+            savedRayVerts = std::move(result.rays);
 
             // Build and upload crack outline
             std::vector<Vertex> outlineVerts;
@@ -160,8 +166,26 @@ int main(int argc, char* argv[])
                 glDeleteVertexArrays(1, &rd.outline.vao);
             }
             rd.outline = uploadLines(outlineVerts);
+            savedOutlineVerts = std::move(outlineVerts);
 
             raysUploaded = true;
+        }
+
+        // Handle save request from UI
+        UIState& ui = uiState();
+        if (ui.saveRequested) {
+            ui.saveRequested = false;
+            if (raysUploaded) {
+                std::string outPath = resDir + "backprojected.fbx";
+                glm::vec3 rc(ui.rayColor[0], ui.rayColor[1], ui.rayColor[2]);
+                glm::vec3 oc(ui.outlineColor[0], ui.outlineColor[1], ui.outlineColor[2]);
+                exportSceneFbx(fbxPath, outPath,
+                               savedRayVerts, rc, ui.rayAlpha,
+                               savedOutlineVerts, oc, ui.outlineAlpha,
+                               meshScale);
+            } else {
+                std::cout << "Cannot save yet — ray casting still in progress.\n";
+            }
         }
 
         renderFrame(window, rd);

@@ -151,7 +151,7 @@ static void resolveTexturePath(const aiScene* scene,
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-bool loadFbx(const std::string& path, SceneData& out, float meshScale)
+bool loadFbx(const std::string& path, SceneData& out, float& meshScale)
 {
     Assimp::Importer importer;
     const aiScene* scene = importer.ReadFile(

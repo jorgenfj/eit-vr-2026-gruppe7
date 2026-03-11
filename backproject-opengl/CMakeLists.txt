@@ -53,6 +53,7 @@ target_link_libraries(imgui_lib PUBLIC
 add_executable(backproject
     main.cpp
     fbx_loader.cpp
+    fbx_exporter.cpp
     scene_geometry.cpp
     renderer.cpp
     backproject.cpp

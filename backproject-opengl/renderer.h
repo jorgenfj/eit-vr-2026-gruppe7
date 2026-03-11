@@ -33,6 +33,9 @@ struct UIState {
     float outlineColor[3]  = {1.0f, 0.0f, 0.0f}; // RGB
     float outlineAlpha     = 1.0f;
     float outlineThickness = 3.0f;
+
+    // Save
+    bool  saveRequested = false;   ///< set true by Save button, cleared by main loop
 };
 
 // ── Renderer ────────────────────────────────────────────────────────────────

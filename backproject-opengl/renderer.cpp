@@ -405,6 +405,12 @@ bool renderFrame(GLFWwindow* window, const RenderData& rd) {
         ImGui::SliderFloat("Outline Thickness", &gUI.outlineThickness, 1.0f, 10.0f);
     }
 
+    ImGui::Separator();
+    if (ImGui::Button("Save FBX", ImVec2(-1, 0))) {
+        gUI.saveRequested = true;
+    }
+    ImGui::TextWrapped("Saves original mesh + rays/outline as a new FBX with current colors.");
+
     ImGui::End();
 
     // ── Render 3D scene ───────────────────────────────────────────────────
