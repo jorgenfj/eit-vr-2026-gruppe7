@@ -13,6 +13,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <queue>
+#include <unordered_set>
 
 // ── CSV / cameras.txt parsing ───────────────────────────────────────────────
 
@@ -579,29 +581,63 @@ static std::vector<glm::vec2> convexHull2D(std::vector<glm::vec2> pts) {
     return hull;
 }
 
+static glm::vec2 principalAxis2D(const std::vector<glm::vec2>& pts)
+{
+    if (pts.size() < 2) return glm::vec2(1.f, 0.f);
+
+    glm::vec2 mean(0.f);
+    for (const auto& p : pts) mean += p;
+    mean /= static_cast<float>(pts.size());
+
+    float sxx = 0.f, sxy = 0.f, syy = 0.f;
+    for (const auto& p : pts) {
+        glm::vec2 d = p - mean;
+        sxx += d.x * d.x;
+        sxy += d.x * d.y;
+        syy += d.y * d.y;
+    }
+
+    if (std::fabs(sxy) < 1e-8f && std::fabs(sxx - syy) < 1e-8f) {
+        return glm::vec2(1.f, 0.f);
+    }
+
+    const float theta = 0.5f * std::atan2(2.f * sxy, sxx - syy);
+    return glm::normalize(glm::vec2(std::cos(theta), std::sin(theta)));
+}
+
+static void smoothChain(std::vector<glm::vec2>& chain)
+{
+    if (chain.size() < 3) return;
+
+    std::vector<glm::vec2> tmp = chain;
+    for (size_t i = 1; i + 1 < chain.size(); ++i) {
+        tmp[i] = (chain[i - 1] + chain[i] + chain[i + 1]) / 3.0f;
+    }
+    chain.swap(tmp);
+}
+
 void buildCrackOutline(const std::vector<HitPoint>& hits,
                        std::vector<Vertex>& outlineVerts,
                        const glm::vec3& color)
 {
     if (hits.size() < 3) return;
 
-    // Cluster hits with a simple spatial hash grid
-    // Cell size: adaptive based on median nearest-neighbour distance
-    // For simplicity, use a fixed cell size based on the AABB extent
     glm::vec3 bmin(std::numeric_limits<float>::max());
     glm::vec3 bmax(-std::numeric_limits<float>::max());
-    for (auto& h : hits) {
+    for (const auto& h : hits) {
         bmin = glm::min(bmin, h.pos);
         bmax = glm::max(bmax, h.pos);
     }
-    glm::vec3 extent = bmax - bmin;
-    float longestAxis = std::max({extent.x, extent.y, extent.z});
+
+    const glm::vec3 extent = bmax - bmin;
+    const float longestAxis = std::max({extent.x, extent.y, extent.z});
     if (longestAxis < 1e-6f) return;
 
-    // Cluster cell size: ~2% of longest axis
-    float clusterCell = longestAxis * 0.02f;
+    const float clusterCell   = longestAxis * 0.02f;
+    const float normalOffset  = longestAxis * 0.001f;
+    const size_t minClusterPoints = 8;
+    const int targetBins = 48;
 
-    // Spatial hash → cluster ID
     struct IVec3Hash {
         size_t operator()(const glm::ivec3& v) const {
             size_t h = std::hash<int>()(v.x);
@@ -610,77 +646,228 @@ void buildCrackOutline(const std::vector<HitPoint>& hits,
             return h;
         }
     };
-    std::unordered_map<glm::ivec3, int, IVec3Hash> cellToCluster;
-    std::vector<std::vector<size_t>> clusters;
+
+    struct BinExtrema {
+        bool hasMin = false;
+        bool hasMax = false;
+        float minV = 0.f;
+        float maxV = 0.f;
+        glm::vec2 minPtUV{0.f, 0.f};
+        glm::vec2 maxPtUV{0.f, 0.f};
+    };
+
+    std::unordered_map<glm::ivec3, std::vector<size_t>, IVec3Hash> cellHits;
+    cellHits.reserve(hits.size());
 
     for (size_t i = 0; i < hits.size(); ++i) {
         glm::ivec3 cell(glm::floor((hits[i].pos - bmin) / clusterCell));
-        auto it = cellToCluster.find(cell);
-        if (it == cellToCluster.end()) {
-            int id = (int)clusters.size();
-            clusters.push_back({});
-            cellToCluster[cell] = id;
-            it = cellToCluster.find(cell);
-        }
-        clusters[it->second].push_back(i);
+        cellHits[cell].push_back(i);
     }
 
-    // Merge small adjacent clusters by flood-filling neighbouring cells
-    // (simple: just group all into one cluster if nearby)
-    // For now, process each cluster independently
+    std::unordered_set<glm::ivec3, IVec3Hash> visited;
+    visited.reserve(cellHits.size());
 
-    const float normalOffset = longestAxis * 0.001f; // slight offset to sit on top
+    std::vector<std::vector<size_t>> clusters;
+    clusters.reserve(cellHits.size());
 
-    for (auto& cluster : clusters) {
-        if (cluster.size() < 3) continue;
+    for (const auto& kv : cellHits) {
+        const glm::ivec3 startCell = kv.first;
+        if (visited.find(startCell) != visited.end()) continue;
 
-        // Compute average normal and centroid
+        std::queue<glm::ivec3> q;
+        q.push(startCell);
+        visited.insert(startCell);
+
+        std::vector<size_t> cluster;
+        while (!q.empty()) {
+            glm::ivec3 c = q.front();
+            q.pop();
+
+            auto it = cellHits.find(c);
+            if (it != cellHits.end()) {
+                cluster.insert(cluster.end(), it->second.begin(), it->second.end());
+            }
+
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0 && dz == 0) continue;
+
+                        glm::ivec3 n = c + glm::ivec3(dx, dy, dz);
+                        if (cellHits.find(n) == cellHits.end()) continue;
+                        if (visited.insert(n).second) {
+                            q.push(n);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (cluster.size() >= minClusterPoints) {
+            clusters.push_back(std::move(cluster));
+        }
+    }
+
+    for (const auto& cluster : clusters) {
         glm::vec3 avgNormal(0.f);
         glm::vec3 centroid(0.f);
+
         for (size_t idx : cluster) {
             avgNormal += hits[idx].normal;
             centroid  += hits[idx].pos;
         }
+
+        const float normalLen2 = glm::dot(avgNormal, avgNormal);
+        if (normalLen2 < 1e-12f) continue;
+
         avgNormal = glm::normalize(avgNormal);
-        centroid /= (float)cluster.size();
+        centroid /= static_cast<float>(cluster.size());
 
-        // Build a local 2D coordinate system on the plane perpendicular to avgNormal
         glm::vec3 up = (std::fabs(avgNormal.y) < 0.99f)
-                            ? glm::vec3(0, 1, 0)
-                            : glm::vec3(1, 0, 0);
-        glm::vec3 tangent  = glm::normalize(glm::cross(up, avgNormal));
-        glm::vec3 binormal = glm::cross(avgNormal, tangent);
+                         ? glm::vec3(0.f, 1.f, 0.f)
+                         : glm::vec3(1.f, 0.f, 0.f);
 
-        // Project hit points onto the 2D plane
+        glm::vec3 tangent = glm::cross(up, avgNormal);
+        const float tangentLen2 = glm::dot(tangent, tangent);
+        if (tangentLen2 < 1e-12f) continue;
+        tangent = glm::normalize(tangent);
+
+        glm::vec3 binormal = glm::normalize(glm::cross(avgNormal, tangent));
+
         std::vector<glm::vec2> pts2d;
         pts2d.reserve(cluster.size());
         for (size_t idx : cluster) {
             glm::vec3 d = hits[idx].pos - centroid;
-            pts2d.push_back({glm::dot(d, tangent), glm::dot(d, binormal)});
+            pts2d.emplace_back(glm::dot(d, tangent), glm::dot(d, binormal));
         }
 
-        // Compute convex hull
-        std::vector<glm::vec2> hull = convexHull2D(pts2d);
-        if (hull.size() < 3) continue;
+        if (pts2d.size() < 3) continue;
 
-        // Convert hull back to 3D, offset along normal
-        std::vector<glm::vec3> hull3d;
-        hull3d.reserve(hull.size());
-        for (auto& p2 : hull) {
-            glm::vec3 worldPt = centroid + tangent * p2.x + binormal * p2.y
-                                + avgNormal * normalOffset;
-            hull3d.push_back(worldPt);
+        const glm::vec2 major = principalAxis2D(pts2d);
+        const glm::vec2 minor(-major.y, major.x);
+
+        std::vector<glm::vec2> ptsUV;
+        ptsUV.reserve(pts2d.size());
+
+        float uMin = std::numeric_limits<float>::max();
+        float uMax = -std::numeric_limits<float>::max();
+
+        for (const auto& p : pts2d) {
+            const float u = glm::dot(p, major);
+            const float v = glm::dot(p, minor);
+            ptsUV.emplace_back(u, v);
+            uMin = std::min(uMin, u);
+            uMax = std::max(uMax, u);
         }
 
-        // Emit line loop
-        for (size_t i = 0; i < hull3d.size(); ++i) {
-            size_t j = (i + 1) % hull3d.size();
-            outlineVerts.push_back({hull3d[i], color});
-            outlineVerts.push_back({hull3d[j], color});
+        const float uRange = uMax - uMin;
+        if (uRange < 1e-6f) continue;
+
+        const float binSize = std::max(uRange / static_cast<float>(targetBins),
+                                       clusterCell * 0.25f);
+        const int numBins = std::max(1, static_cast<int>(std::ceil(uRange / binSize)));
+
+        std::vector<BinExtrema> bins(static_cast<size_t>(numBins));
+
+        for (const auto& uv : ptsUV) {
+            int bin = static_cast<int>(std::floor((uv.x - uMin) / binSize));
+            bin = std::clamp(bin, 0, numBins - 1);
+
+            auto& b = bins[static_cast<size_t>(bin)];
+
+            if (!b.hasMin || uv.y < b.minV) {
+                b.hasMin = true;
+                b.minV = uv.y;
+                b.minPtUV = uv;
+            }
+
+            if (!b.hasMax || uv.y > b.maxV) {
+                b.hasMax = true;
+                b.maxV = uv.y;
+                b.maxPtUV = uv;
+            }
+        }
+
+        std::vector<glm::vec2> upper;
+        std::vector<glm::vec2> lower;
+        upper.reserve(bins.size());
+        lower.reserve(bins.size());
+
+        for (const auto& b : bins) {
+            if (b.hasMax) upper.push_back(b.maxPtUV);
+            if (b.hasMin) lower.push_back(b.minPtUV);
+        }
+
+        if (upper.size() < 2 || lower.size() < 2) continue;
+
+        smoothChain(upper);
+        smoothChain(lower);
+
+        std::vector<glm::vec2> poly2d;
+        poly2d.reserve(upper.size() + lower.size());
+
+        const float mergeEps2 = (clusterCell * 0.1f) * (clusterCell * 0.1f);
+
+        auto pushUnique = [&](const glm::vec2& p) {
+            if (poly2d.empty()) {
+                poly2d.push_back(p);
+                return;
+            }
+            glm::vec2 d = p - poly2d.back();
+            if (glm::dot(d, d) > mergeEps2) {
+                poly2d.push_back(p);
+            }
+        };
+
+        for (const auto& uv : upper) {
+            pushUnique(major * uv.x + minor * uv.y);
+        }
+        for (size_t i = lower.size(); i-- > 0;) {
+            pushUnique(major * lower[i].x + minor * lower[i].y);
+        }
+
+        if (poly2d.size() >= 2) {
+            glm::vec2 d = poly2d.front() - poly2d.back();
+            if (glm::dot(d, d) <= mergeEps2) {
+                poly2d.pop_back();
+            }
+        }
+
+        if (poly2d.size() < 3) continue;
+
+        // For each outline vertex in 2D, find the nearest original hit point
+        // and use its actual 3D position + individual normal for the offset.
+        // This makes the outline follow the mesh curvature instead of lying
+        // on a flat plane.
+        std::vector<glm::vec3> poly3d;
+        poly3d.reserve(poly2d.size());
+
+        for (const auto& p : poly2d) {
+            // Find the closest hit point in 2D (tangent-binormal space)
+            float bestDist2 = std::numeric_limits<float>::max();
+            size_t bestIdx = cluster[0];
+            for (size_t ci = 0; ci < cluster.size(); ++ci) {
+                glm::vec2 diff = pts2d[ci] - p;
+                float d2 = glm::dot(diff, diff);
+                if (d2 < bestDist2) {
+                    bestDist2 = d2;
+                    bestIdx = cluster[ci];
+                }
+            }
+            // Use the actual hit position, offset along that hit's own normal
+            glm::vec3 worldPt = hits[bestIdx].pos
+                              + hits[bestIdx].normal * normalOffset;
+            poly3d.push_back(worldPt);
+        }
+
+        for (size_t i = 0; i < poly3d.size(); ++i) {
+            size_t j = (i + 1) % poly3d.size();
+            outlineVerts.push_back({poly3d[i], color});
+            outlineVerts.push_back({poly3d[j], color});
         }
     }
 
-    std::cout << "Crack outline: " << clusters.size() << " clusters, "
+    std::cout << "Crack outline: " << clusters.size() << " merged clusters, "
               << outlineVerts.size() / 2 << " line segments.\n";
 }
 
