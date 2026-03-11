@@ -177,7 +177,7 @@ bool loadCrackPixels(const std::string& path, std::vector<CrackPixel>& pixels)
 
 static bool rayTriangle(const glm::vec3& orig, const glm::vec3& dir,
                         const glm::vec3& v0, const glm::vec3& v1, const glm::vec3& v2,
-                        float& t)
+                        float& t, float& uOut, float& vOut)
 {
     const float EPS = 1e-7f;
     glm::vec3 e1 = v1 - v0;
@@ -196,7 +196,18 @@ static bool rayTriangle(const glm::vec3& orig, const glm::vec3& dir,
     if (v < 0.f || u + v > 1.f) return false;
 
     t = f * glm::dot(e2, q);
+    uOut = u;
+    vOut = v;
     return t > EPS;
+}
+
+// Convenience overload without barycentric coords
+static bool rayTriangle(const glm::vec3& orig, const glm::vec3& dir,
+                        const glm::vec3& v0, const glm::vec3& v1, const glm::vec3& v2,
+                        float& t)
+{
+    float u, v;
+    return rayTriangle(orig, dir, v0, v1, v2, t, u, v);
 }
 
 // ── Undistort pixel (SIMPLE_RADIAL) ─────────────────────────────────────────
@@ -343,10 +354,11 @@ static UniformGrid buildGrid(const std::vector<MeshVertex>& tris)
 
 // Walk the grid with 3-D DDA and test triangles in each cell.
 // Returns true if a hit is found, setting bestT to the closest hit distance.
+// Also returns the triangle index and barycentric coords of the hit.
 static bool gridRayCast(const UniformGrid& g,
                         const std::vector<MeshVertex>& tris,
                         const glm::vec3& orig, const glm::vec3& dir,
-                        float& bestT)
+                        float& bestT, int& hitTri, float& hitU, float& hitV)
 {
     // Clip ray to grid AABB — find tMin and tMax entry/exit along ray
     glm::vec3 invDir(1.f / dir.x, 1.f / dir.y, 1.f / dir.z);
@@ -388,6 +400,8 @@ static bool gridRayCast(const UniformGrid& g,
     }
 
     bestT = std::numeric_limits<float>::max();
+    hitTri = -1;
+    hitU = hitV = 0.f;
     bool found = false;
 
     // Walk through cells
@@ -395,12 +409,15 @@ static bool gridRayCast(const UniformGrid& g,
         // Test all triangles in this cell
         const auto& bucket = g.cells[g.idx(cell.x, cell.y, cell.z)];
         for (int ti : bucket) {
-            float t;
+            float t, u, v;
             if (rayTriangle(orig, dir,
                             tris[ti * 3].pos, tris[ti * 3 + 1].pos, tris[ti * 3 + 2].pos,
-                            t))
+                            t, u, v))
             {
-                if (t < bestT) { bestT = t; found = true; }
+                if (t < bestT) {
+                    bestT = t; hitTri = ti; hitU = u; hitV = v;
+                    found = true;
+                }
             }
         }
 
@@ -433,7 +450,8 @@ int buildCrackRays(const std::vector<CrackPixel>& pixels,
                    const Intrinsics& intr,
                    const std::vector<CameraPose>& cameras,
                    const std::vector<MeshVertex>& meshTris,
-                   std::vector<Vertex>& rayLines)
+                   std::vector<Vertex>& rayLines,
+                   std::vector<HitPoint>* hitPoints)
 {
     if (meshTris.empty() || pixels.empty()) return 0;
 
@@ -457,7 +475,7 @@ int buildCrackRays(const std::vector<CrackPixel>& pixels,
 
     int hits = 0;
     int noCamera = 0;
-    glm::vec3 rayCol(1.f, 0.2f, 0.2f); // red for cracks
+    glm::vec3 rayCol(0.9f, 0.8f, 0.0f); // yellow for cracks
 
     for (size_t pi = 0; pi < pixels.size(); ++pi) {
         const auto& px = pixels[pi];
@@ -484,11 +502,23 @@ int buildCrackRays(const std::vector<CrackPixel>& pixels,
 
         // Ray-cast through the uniform grid
         float bestT;
-        if (gridRayCast(grid, meshTris, origin, dir, bestT)) {
+        int hitTri;
+        float hitU, hitV;
+        if (gridRayCast(grid, meshTris, origin, dir, bestT, hitTri, hitU, hitV)) {
             glm::vec3 hitPt = origin + dir * bestT;
             rayLines.push_back({origin, rayCol});
             rayLines.push_back({hitPt,  rayCol});
             ++hits;
+
+            // Collect hit point + interpolated normal for outline
+            if (hitPoints) {
+                const glm::vec3& n0 = meshTris[hitTri * 3 + 0].normal;
+                const glm::vec3& n1 = meshTris[hitTri * 3 + 1].normal;
+                const glm::vec3& n2 = meshTris[hitTri * 3 + 2].normal;
+                float w0 = 1.f - hitU - hitV;
+                glm::vec3 normal = glm::normalize(n0 * w0 + n1 * hitU + n2 * hitV);
+                hitPoints->push_back({hitPt, normal});
+            }
         }
 
         // Progress every 5000 pixels
@@ -504,6 +534,154 @@ int buildCrackRays(const std::vector<CrackPixel>& pixels,
               << " rays hit the mesh.\n";
 
     return hits;
+}
+
+// ── Crack outline: convex hull clusters offset along surface normal ─────────
+// We cluster nearby hit points using a simple grid-based approach, then compute
+// a 2D convex hull projected onto the dominant plane of each cluster.
+// The outline vertices are offset along the average surface normal so they
+// sit slightly in front of the mesh surface.
+
+// Sort 2D points by angle around centroid for convex hull
+static std::vector<glm::vec2> convexHull2D(std::vector<glm::vec2> pts) {
+    if (pts.size() < 3) return pts;
+
+    // Find bottom-most (then left-most) point
+    size_t pivot = 0;
+    for (size_t i = 1; i < pts.size(); ++i) {
+        if (pts[i].y < pts[pivot].y ||
+            (pts[i].y == pts[pivot].y && pts[i].x < pts[pivot].x))
+            pivot = i;
+    }
+    std::swap(pts[0], pts[pivot]);
+    glm::vec2 p0 = pts[0];
+
+    // Sort by polar angle
+    std::sort(pts.begin() + 1, pts.end(), [&](const glm::vec2& a, const glm::vec2& b) {
+        float cross = (a.x - p0.x) * (b.y - p0.y) - (a.y - p0.y) * (b.x - p0.x);
+        if (std::fabs(cross) < 1e-8f)
+            return glm::length(a - p0) < glm::length(b - p0);
+        return cross > 0.f;
+    });
+
+    // Graham scan
+    std::vector<glm::vec2> hull;
+    for (auto& p : pts) {
+        while (hull.size() >= 2) {
+            glm::vec2 a = hull[hull.size() - 2];
+            glm::vec2 b = hull[hull.size() - 1];
+            float cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+            if (cross <= 0.f) hull.pop_back();
+            else break;
+        }
+        hull.push_back(p);
+    }
+    return hull;
+}
+
+void buildCrackOutline(const std::vector<HitPoint>& hits,
+                       std::vector<Vertex>& outlineVerts,
+                       const glm::vec3& color)
+{
+    if (hits.size() < 3) return;
+
+    // Cluster hits with a simple spatial hash grid
+    // Cell size: adaptive based on median nearest-neighbour distance
+    // For simplicity, use a fixed cell size based on the AABB extent
+    glm::vec3 bmin(std::numeric_limits<float>::max());
+    glm::vec3 bmax(-std::numeric_limits<float>::max());
+    for (auto& h : hits) {
+        bmin = glm::min(bmin, h.pos);
+        bmax = glm::max(bmax, h.pos);
+    }
+    glm::vec3 extent = bmax - bmin;
+    float longestAxis = std::max({extent.x, extent.y, extent.z});
+    if (longestAxis < 1e-6f) return;
+
+    // Cluster cell size: ~2% of longest axis
+    float clusterCell = longestAxis * 0.02f;
+
+    // Spatial hash → cluster ID
+    struct IVec3Hash {
+        size_t operator()(const glm::ivec3& v) const {
+            size_t h = std::hash<int>()(v.x);
+            h ^= std::hash<int>()(v.y) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<int>()(v.z) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+    std::unordered_map<glm::ivec3, int, IVec3Hash> cellToCluster;
+    std::vector<std::vector<size_t>> clusters;
+
+    for (size_t i = 0; i < hits.size(); ++i) {
+        glm::ivec3 cell(glm::floor((hits[i].pos - bmin) / clusterCell));
+        auto it = cellToCluster.find(cell);
+        if (it == cellToCluster.end()) {
+            int id = (int)clusters.size();
+            clusters.push_back({});
+            cellToCluster[cell] = id;
+            it = cellToCluster.find(cell);
+        }
+        clusters[it->second].push_back(i);
+    }
+
+    // Merge small adjacent clusters by flood-filling neighbouring cells
+    // (simple: just group all into one cluster if nearby)
+    // For now, process each cluster independently
+
+    const float normalOffset = longestAxis * 0.001f; // slight offset to sit on top
+
+    for (auto& cluster : clusters) {
+        if (cluster.size() < 3) continue;
+
+        // Compute average normal and centroid
+        glm::vec3 avgNormal(0.f);
+        glm::vec3 centroid(0.f);
+        for (size_t idx : cluster) {
+            avgNormal += hits[idx].normal;
+            centroid  += hits[idx].pos;
+        }
+        avgNormal = glm::normalize(avgNormal);
+        centroid /= (float)cluster.size();
+
+        // Build a local 2D coordinate system on the plane perpendicular to avgNormal
+        glm::vec3 up = (std::fabs(avgNormal.y) < 0.99f)
+                            ? glm::vec3(0, 1, 0)
+                            : glm::vec3(1, 0, 0);
+        glm::vec3 tangent  = glm::normalize(glm::cross(up, avgNormal));
+        glm::vec3 binormal = glm::cross(avgNormal, tangent);
+
+        // Project hit points onto the 2D plane
+        std::vector<glm::vec2> pts2d;
+        pts2d.reserve(cluster.size());
+        for (size_t idx : cluster) {
+            glm::vec3 d = hits[idx].pos - centroid;
+            pts2d.push_back({glm::dot(d, tangent), glm::dot(d, binormal)});
+        }
+
+        // Compute convex hull
+        std::vector<glm::vec2> hull = convexHull2D(pts2d);
+        if (hull.size() < 3) continue;
+
+        // Convert hull back to 3D, offset along normal
+        std::vector<glm::vec3> hull3d;
+        hull3d.reserve(hull.size());
+        for (auto& p2 : hull) {
+            glm::vec3 worldPt = centroid + tangent * p2.x + binormal * p2.y
+                                + avgNormal * normalOffset;
+            hull3d.push_back(worldPt);
+        }
+
+        // Emit line loop
+        for (size_t i = 0; i < hull3d.size(); ++i) {
+            size_t j = (i + 1) % hull3d.size();
+            outlineVerts.push_back({hull3d[i], color});
+            outlineVerts.push_back({hull3d[j], color});
+        }
+    }
+
+    std::cout << "Crack outline: " << clusters.size() << " clusters, "
+              << outlineVerts.size() / 2 << " line segments.\n";
 }
 
 int buildBackprojectionRays(const std::vector<ArucoDetection>& dets,

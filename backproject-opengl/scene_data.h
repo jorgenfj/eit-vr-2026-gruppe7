@@ -53,6 +53,12 @@ struct CrackPixel {
     float       y;          ///< pixel y
 };
 
+/// A ray-mesh hit point with surface normal (used to build crack outlines).
+struct HitPoint {
+    glm::vec3 pos;
+    glm::vec3 normal;
+};
+
 /// Everything we extract from the FBX file.
 struct SceneData {
     std::vector<CameraPose> cameraPoses;

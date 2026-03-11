@@ -1,6 +1,9 @@
 #include "renderer.h"
 
 #include "stb_image.h"
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -26,8 +29,11 @@ static const char* fragSrc = R"(
 #version 330 core
 in  vec3 vCol;
 out vec4 FragColor;
+uniform float uAlpha;
+uniform vec3  uColorOverride;  // if any component > -0.5, use this color
 void main() {
-    FragColor = vec4(vCol, 1.0);
+    vec3 col = (uColorOverride.r > -0.5) ? uColorOverride : vCol;
+    FragColor = vec4(col, uAlpha);
 }
 )";
 
@@ -77,9 +83,10 @@ void main() {
 
 // ── Global orbit camera ─────────────────────────────────────────────────────
 static OrbitCamera gCam;
-static bool gShowRays = true;   // toggled with 'R'
+static UIState gUI;
 
 OrbitCamera& orbitCamera() { return gCam; }
+UIState& uiState() { return gUI; }
 
 // ── OrbitCamera implementation ──────────────────────────────────────────────
 glm::mat4 OrbitCamera::viewMatrix() const {
@@ -91,20 +98,27 @@ glm::mat4 OrbitCamera::viewMatrix() const {
 
 // ── GLFW callbacks ──────────────────────────────────────────────────────────
 static void keyCb(GLFWwindow* w, int key, int /*scancode*/, int action, int /*mods*/) {
+    if (ImGui::GetIO().WantCaptureKeyboard) return;  // ImGui has focus
     if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
         glfwSetWindowShouldClose(w, true);
     if (key == GLFW_KEY_B && action == GLFW_PRESS) {
-        gShowRays = !gShowRays;
-        std::cout << "Backprojection rays: " << (gShowRays ? "ON" : "OFF") << "\n";
+        gUI.showRays = !gUI.showRays;
+        std::cout << "Backprojection rays: " << (gUI.showRays ? "ON" : "OFF") << "\n";
+    }
+    if (key == GLFW_KEY_M && action == GLFW_PRESS) {
+        gUI.showOutline = !gUI.showOutline;
+        std::cout << "Crack outline: " << (gUI.showOutline ? "ON" : "OFF") << "\n";
     }
 }
 
 static void scrollCb(GLFWwindow*, double, double yoff) {
+    if (ImGui::GetIO().WantCaptureMouse) return;
     gCam.distance *= (yoff > 0) ? 0.9f : 1.1f;
     gCam.distance = std::clamp(gCam.distance, 0.5f, 5000.f);
 }
 
 static void mouseButtonCb(GLFWwindow* w, int btn, int act, int) {
+    if (ImGui::GetIO().WantCaptureMouse) return;
     if (btn == GLFW_MOUSE_BUTTON_LEFT) {
         gCam.dragging = (act == GLFW_PRESS);
         double x, y; glfwGetCursorPos(w, &x, &y);
@@ -118,6 +132,7 @@ static void mouseButtonCb(GLFWwindow* w, int btn, int act, int) {
 }
 
 static void cursorPosCb(GLFWwindow*, double xd, double yd) {
+    if (ImGui::GetIO().WantCaptureMouse) return;
     float x = (float)xd, y = (float)yd;
     float dx = x - gCam.lastX, dy = y - gCam.lastY;
     gCam.lastX = x; gCam.lastY = y;
@@ -208,6 +223,15 @@ GLFWwindow* initWindow(int width, int height, const char* title) {
         glfwTerminate();
         return nullptr;
     }
+
+    // ── Initialise Dear ImGui ──────────────────────────────────────────────
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::StyleColorsDark();
+    ImGui_ImplGlfw_InitForOpenGL(window, true);  // installs its own callbacks
+    ImGui_ImplOpenGL3_Init("#version 330");
 
     return window;
 }
@@ -322,17 +346,21 @@ GLuint loadTextureFromFile(const std::string& path) {
 
 // Shared GL state initialised on first call
 static bool gGlStateInit = false;
-static GLint gLineMvpLoc  = -1;
-static GLint gMeshMvpLoc  = -1;
-static GLint gMeshModelLoc = -1;
-static GLint gMeshLightLoc = -1;
-static GLint gMeshViewLoc  = -1;
-static GLint gMeshTexLoc   = -1;
+static GLint gLineMvpLoc    = -1;
+static GLint gLineAlphaLoc  = -1;
+static GLint gLineColorLoc  = -1;  // uColorOverride
+static GLint gMeshMvpLoc    = -1;
+static GLint gMeshModelLoc  = -1;
+static GLint gMeshLightLoc  = -1;
+static GLint gMeshViewLoc   = -1;
+static GLint gMeshTexLoc    = -1;
 static glm::vec3 gLightDir;
 
 static void initGlState(const RenderData& rd) {
     if (gGlStateInit) return;
     gLineMvpLoc   = glGetUniformLocation(rd.lineProg,  "uMVP");
+    gLineAlphaLoc = glGetUniformLocation(rd.lineProg,  "uAlpha");
+    gLineColorLoc = glGetUniformLocation(rd.lineProg,  "uColorOverride");
     gMeshMvpLoc   = glGetUniformLocation(rd.meshProg,  "uMVP");
     gMeshModelLoc = glGetUniformLocation(rd.meshProg,  "uModel");
     gMeshLightLoc = glGetUniformLocation(rd.meshProg,  "uLightDir");
@@ -340,6 +368,8 @@ static void initGlState(const RenderData& rd) {
     gMeshTexLoc   = glGetUniformLocation(rd.meshProg,  "uDiffuse");
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_MULTISAMPLE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glLineWidth(1.5f);
     glClearColor(0.12f, 0.12f, 0.14f, 1.f);
     gLightDir = glm::normalize(glm::vec3(0.4f, 1.0f, 0.6f));
@@ -352,6 +382,32 @@ bool renderFrame(GLFWwindow* window, const RenderData& rd) {
     glfwPollEvents();
     if (glfwWindowShouldClose(window)) return false;
 
+    // ── Start ImGui frame ─────────────────────────────────────────────────
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    // ── UI Panel ──────────────────────────────────────────────────────────
+    ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Display Settings");
+
+    if (ImGui::CollapsingHeader("Rays", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Show Rays (B)", &gUI.showRays);
+        ImGui::ColorEdit3("Ray Color", gUI.rayColor);
+        ImGui::SliderFloat("Ray Opacity", &gUI.rayAlpha, 0.0f, 1.0f);
+    }
+
+    if (ImGui::CollapsingHeader("Crack Outline", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Show Outline (M)", &gUI.showOutline);
+        ImGui::ColorEdit3("Outline Color", gUI.outlineColor);
+        ImGui::SliderFloat("Outline Opacity", &gUI.outlineAlpha, 0.0f, 1.0f);
+        ImGui::SliderFloat("Outline Thickness", &gUI.outlineThickness, 1.0f, 10.0f);
+    }
+
+    ImGui::End();
+
+    // ── Render 3D scene ───────────────────────────────────────────────────
     int w, h;
     glfwGetFramebufferSize(window, &w, &h);
     if (h == 0) h = 1;
@@ -381,19 +437,44 @@ bool renderFrame(GLFWwindow* window, const RenderData& rd) {
         glDrawArrays(GL_TRIANGLES, 0, rd.triangles.vertexCount);
     }
 
-    // ── Draw lines (axes, frustums, trajectory) ───────────────────────────
+    // ── Draw lines (axes, frustums, trajectory) — always opaque ───────────
     glUseProgram(rd.lineProg);
     glUniformMatrix4fv(gLineMvpLoc, 1, GL_FALSE, glm::value_ptr(mvp));
+    glm::vec3 noOverride(-1.f);
+    if (gLineAlphaLoc != -1) glUniform1f(gLineAlphaLoc, 1.0f);  // fully opaque
+    if (gLineColorLoc != -1) glUniform3fv(gLineColorLoc, 1, glm::value_ptr(noOverride));
     glBindVertexArray(rd.lines.vao);
     glDrawArrays(GL_LINES, 0, rd.lines.vertexCount);
 
-    // ── Draw backprojection rays (toggle with R) ──────────────────────────
-    if (gShowRays && rd.rays.vertexCount > 0) {
+    // ── Draw backprojection rays (toggle with B, color/alpha from UI) ─────
+    if (gUI.showRays && rd.rays.vertexCount > 0) {
         glLineWidth(2.0f);
+        if (gLineAlphaLoc != -1) glUniform1f(gLineAlphaLoc, gUI.rayAlpha);
+        glm::vec3 rc(gUI.rayColor[0], gUI.rayColor[1], gUI.rayColor[2]);
+        if (gLineColorLoc != -1) glUniform3fv(gLineColorLoc, 1, glm::value_ptr(rc));
         glBindVertexArray(rd.rays.vao);
         glDrawArrays(GL_LINES, 0, rd.rays.vertexCount);
         glLineWidth(1.5f);
     }
+
+    // ── Draw crack outline (toggle with M, color/alpha/thickness from UI) ─
+    if (gUI.showOutline && rd.outline.vertexCount > 0) {
+        glLineWidth(gUI.outlineThickness);
+        // Slight depth offset so outline sits on top of mesh
+        glEnable(GL_POLYGON_OFFSET_LINE);
+        glPolygonOffset(-1.f, -1.f);
+        if (gLineAlphaLoc != -1) glUniform1f(gLineAlphaLoc, gUI.outlineAlpha);
+        glm::vec3 oc(gUI.outlineColor[0], gUI.outlineColor[1], gUI.outlineColor[2]);
+        if (gLineColorLoc != -1) glUniform3fv(gLineColorLoc, 1, glm::value_ptr(oc));
+        glBindVertexArray(rd.outline.vao);
+        glDrawArrays(GL_LINES, 0, rd.outline.vertexCount);
+        glDisable(GL_POLYGON_OFFSET_LINE);
+        glLineWidth(1.5f);
+    }
+
+    // ── Render ImGui on top ───────────────────────────────────────────────
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
     glfwSwapBuffers(window);
     return true;
@@ -405,6 +486,10 @@ void runRenderLoop(GLFWwindow* window, const RenderData& rd) {
 
 // ── Cleanup ─────────────────────────────────────────────────────────────────
 void cleanup(GLFWwindow* window, const RenderData& rd) {
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+
     glDeleteBuffers(1, &rd.lines.vbo);
     glDeleteVertexArrays(1, &rd.lines.vao);
     if (rd.triangles.vbo) {
@@ -414,6 +499,10 @@ void cleanup(GLFWwindow* window, const RenderData& rd) {
     if (rd.rays.vbo) {
         glDeleteBuffers(1, &rd.rays.vbo);
         glDeleteVertexArrays(1, &rd.rays.vao);
+    }
+    if (rd.outline.vbo) {
+        glDeleteBuffers(1, &rd.outline.vbo);
+        glDeleteVertexArrays(1, &rd.outline.vao);
     }
     if (rd.diffuseTex) glDeleteTextures(1, &rd.diffuseTex);
     glDeleteProgram(rd.lineProg);

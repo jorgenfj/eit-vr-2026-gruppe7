@@ -22,6 +22,34 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
+# ── Fetch Dear ImGui ─────────────────────────────────────────────────────
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        v1.90.4
+)
+FetchContent_MakeAvailable(imgui)
+
+# Build ImGui as a static library with OpenGL3+GLFW backends
+add_library(imgui_lib STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_demo.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+)
+target_include_directories(imgui_lib PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+)
+target_link_libraries(imgui_lib PUBLIC
+    PkgConfig::GLFW3
+    PkgConfig::GLEW
+    OpenGL::GL
+)
+
 add_executable(backproject
     main.cpp
     fbx_loader.cpp
@@ -36,4 +64,5 @@ target_link_libraries(backproject PRIVATE
     PkgConfig::GLFW3
     PkgConfig::GLEW
     OpenGL::GL
+    imgui_lib
 )

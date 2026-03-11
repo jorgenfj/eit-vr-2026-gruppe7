@@ -104,13 +104,17 @@ int main(int argc, char* argv[])
     // ── Launch ray casting in background thread ───────────────────────────
     // Ray casting over 700k triangles can take several seconds; we don't
     // want to block the window from opening.
-    std::future<std::vector<Vertex>> rayFuture = std::async(
+    struct RayResult {
+        std::vector<Vertex> rays;
+        std::vector<HitPoint> hitPoints;
+    };
+    std::future<RayResult> rayFuture = std::async(
         std::launch::async,
         [&]() {
-            std::vector<Vertex> rays;
+            RayResult result;
             buildCrackRays(crackPixels, intr, cameraPoses,
-                           scene.meshTriangles, rays);
-            return rays;
+                           scene.meshTriangles, result.rays, &result.hitPoints);
+            return result;
         });
 
     // ── Init window + GL ──────────────────────────────────────────────────
@@ -121,6 +125,7 @@ int main(int argc, char* argv[])
     rd.lines     = uploadLines(lineVerts);
     rd.triangles = uploadTriangles(scene.meshTriangles);
     rd.rays      = uploadLines({});   // empty for now
+    rd.outline   = uploadLines({});   // empty for now
     rd.lineProg  = createProgram();
     rd.meshProg  = createMeshProgram();
 
@@ -136,14 +141,26 @@ int main(int argc, char* argv[])
         if (!raysUploaded &&
             rayFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
         {
-            std::vector<Vertex> rays = rayFuture.get();
-            std::cout << "Uploading " << rays.size() / 2 << " ray segments to GPU.\n";
-            // Free old (empty) VBO and upload real data
+            RayResult result = rayFuture.get();
+            std::cout << "Uploading " << result.rays.size() / 2 << " ray segments to GPU.\n";
+
+            // Free old (empty) VBOs and upload real data
             if (rd.rays.vbo) {
                 glDeleteBuffers(1, &rd.rays.vbo);
                 glDeleteVertexArrays(1, &rd.rays.vao);
             }
-            rd.rays = uploadLines(rays);
+            rd.rays = uploadLines(result.rays);
+
+            // Build and upload crack outline
+            std::vector<Vertex> outlineVerts;
+            buildCrackOutline(result.hitPoints, outlineVerts);
+            std::cout << "Uploading " << outlineVerts.size() / 2 << " outline segments to GPU.\n";
+            if (rd.outline.vbo) {
+                glDeleteBuffers(1, &rd.outline.vbo);
+                glDeleteVertexArrays(1, &rd.outline.vao);
+            }
+            rd.outline = uploadLines(outlineVerts);
+
             raysUploaded = true;
         }
 

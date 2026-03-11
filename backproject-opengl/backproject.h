@@ -27,13 +27,22 @@ bool loadArucoDetections(const std::string& path,
 /// For each crack pixel, find the matching camera pose by frame number,
 /// unproject the pixel into a world-space ray, intersect with the mesh, and
 /// emit a coloured line from the camera origin to the hit point.
+/// Optionally also collects hit positions + normals for outline building.
 ///
 /// Returns the number of rays that actually hit the mesh.
 int buildCrackRays(const std::vector<CrackPixel>& pixels,
                    const Intrinsics& intr,
                    const std::vector<CameraPose>& cameras,
                    const std::vector<MeshVertex>& meshTris,
-                   std::vector<Vertex>& rayLines);
+                   std::vector<Vertex>& rayLines,
+                   std::vector<HitPoint>* hitPoints = nullptr);
+
+/// Build a polygonal outline around clusters of ray hit points.
+/// The outline is offset slightly along the surface normal so it sits
+/// on top of / in front of the mesh.
+void buildCrackOutline(const std::vector<HitPoint>& hits,
+                       std::vector<Vertex>& outlineVerts,
+                       const glm::vec3& color = glm::vec3(1.f, 0.f, 0.f));
 
 /// Legacy: ArUco detection backprojection (FBX camera convention).
 int buildBackprojectionRays(const std::vector<ArucoDetection>& dets,
