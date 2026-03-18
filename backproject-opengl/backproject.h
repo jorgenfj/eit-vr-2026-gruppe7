@@ -38,11 +38,12 @@ int buildCrackRays(const std::vector<CrackPixel>& pixels,
                    std::vector<HitPoint>* hitPoints = nullptr);
 
 /// Build a polygonal outline around clusters of ray hit points.
-/// The outline is offset slightly along the surface normal so it sits
-/// on top of / in front of the mesh.
-void buildCrackOutline(const std::vector<HitPoint>& hits,
-                       std::vector<Vertex>& outlineVerts,
-                       const glm::vec3& color = glm::vec3(1.f, 0.f, 0.f));
+/// Outputs OutlineVertex with base position (on mesh surface) and surface
+/// normal — the actual bump displacement is applied in the shader at render time.
+/// Returns the longest axis of the hit-point bounding box (used for bump scale).
+float buildCrackOutline(const std::vector<HitPoint>& hits,
+                        std::vector<OutlineVertex>& outlineVerts,
+                        const glm::vec3& color = glm::vec3(1.f, 0.f, 0.f));
 
 /// Legacy: ArUco detection backprojection (FBX camera convention).
 int buildBackprojectionRays(const std::vector<ArucoDetection>& dets,

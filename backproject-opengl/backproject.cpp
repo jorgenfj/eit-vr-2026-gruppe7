@@ -616,11 +616,11 @@ static void smoothChain(std::vector<glm::vec2>& chain)
     chain.swap(tmp);
 }
 
-void buildCrackOutline(const std::vector<HitPoint>& hits,
-                       std::vector<Vertex>& outlineVerts,
-                       const glm::vec3& color)
+float buildCrackOutline(const std::vector<HitPoint>& hits,
+                        std::vector<OutlineVertex>& outlineVerts,
+                        const glm::vec3& color)
 {
-    if (hits.size() < 3) return;
+    if (hits.size() < 3) return 0.f;
 
     glm::vec3 bmin(std::numeric_limits<float>::max());
     glm::vec3 bmax(-std::numeric_limits<float>::max());
@@ -631,10 +631,9 @@ void buildCrackOutline(const std::vector<HitPoint>& hits,
 
     const glm::vec3 extent = bmax - bmin;
     const float longestAxis = std::max({extent.x, extent.y, extent.z});
-    if (longestAxis < 1e-6f) return;
+    if (longestAxis < 1e-6f) return 0.f;
 
     const float clusterCell   = longestAxis * 0.02f;
-    const float normalOffset  = longestAxis * 0.001f;
     const size_t minClusterPoints = 8;
     const int targetBins = 48;
 
@@ -840,7 +839,9 @@ void buildCrackOutline(const std::vector<HitPoint>& hits,
         // This makes the outline follow the mesh curvature instead of lying
         // on a flat plane.
         std::vector<glm::vec3> poly3d;
+        std::vector<glm::vec3> normals3d;
         poly3d.reserve(poly2d.size());
+        normals3d.reserve(poly2d.size());
 
         for (const auto& p : poly2d) {
             // Find the closest hit point in 2D (tangent-binormal space)
@@ -854,21 +855,63 @@ void buildCrackOutline(const std::vector<HitPoint>& hits,
                     bestIdx = cluster[ci];
                 }
             }
-            // Use the actual hit position, offset along that hit's own normal
-            glm::vec3 worldPt = hits[bestIdx].pos
-                              + hits[bestIdx].normal * normalOffset;
-            poly3d.push_back(worldPt);
+            // Store base position and normal — bump is applied in the shader
+            poly3d.push_back(hits[bestIdx].pos);
+            normals3d.push_back(hits[bestIdx].normal);
         }
 
+        // For each segment, emit a 3D box (3 visible faces = 18 vertices):
+        //   - Front wall  (sideOff = +1)
+        //   - Back wall   (sideOff = -1)
+        //   - Top cap      (height  = 1)
+        // Width and height are applied in the shader via uniforms.
         for (size_t i = 0; i < poly3d.size(); ++i) {
             size_t j = (i + 1) % poly3d.size();
-            outlineVerts.push_back({poly3d[i], color});
-            outlineVerts.push_back({poly3d[j], color});
+
+            glm::vec3 segDir = poly3d[j] - poly3d[i];
+            float segLen = glm::length(segDir);
+            if (segLen < 1e-8f) continue;
+            segDir /= segLen;
+
+            // Side direction: perpendicular to segment on the mesh surface
+            glm::vec3 sideA = glm::normalize(glm::cross(segDir, normals3d[i]));
+            glm::vec3 sideB = glm::normalize(glm::cross(segDir, normals3d[j]));
+
+            //  pos, normal, side, col, height, sideOff
+            auto V = [&](const glm::vec3& p, const glm::vec3& n,
+                         const glm::vec3& s, float h, float so) -> OutlineVertex {
+                return {p, n, s, color, h, so};
+            };
+
+            // Front wall (sideOff = +1 side)
+            outlineVerts.push_back(V(poly3d[i], normals3d[i], sideA, 0.f, +1.f));
+            outlineVerts.push_back(V(poly3d[j], normals3d[j], sideB, 0.f, +1.f));
+            outlineVerts.push_back(V(poly3d[j], normals3d[j], sideB, 1.f, +1.f));
+            outlineVerts.push_back(V(poly3d[i], normals3d[i], sideA, 0.f, +1.f));
+            outlineVerts.push_back(V(poly3d[j], normals3d[j], sideB, 1.f, +1.f));
+            outlineVerts.push_back(V(poly3d[i], normals3d[i], sideA, 1.f, +1.f));
+
+            // Back wall (sideOff = -1 side)
+            outlineVerts.push_back(V(poly3d[j], normals3d[j], sideB, 0.f, -1.f));
+            outlineVerts.push_back(V(poly3d[i], normals3d[i], sideA, 0.f, -1.f));
+            outlineVerts.push_back(V(poly3d[i], normals3d[i], sideA, 1.f, -1.f));
+            outlineVerts.push_back(V(poly3d[j], normals3d[j], sideB, 0.f, -1.f));
+            outlineVerts.push_back(V(poly3d[i], normals3d[i], sideA, 1.f, -1.f));
+            outlineVerts.push_back(V(poly3d[j], normals3d[j], sideB, 1.f, -1.f));
+
+            // Top cap (height = 1)
+            outlineVerts.push_back(V(poly3d[i], normals3d[i], sideA, 1.f, -1.f));
+            outlineVerts.push_back(V(poly3d[i], normals3d[i], sideA, 1.f, +1.f));
+            outlineVerts.push_back(V(poly3d[j], normals3d[j], sideB, 1.f, +1.f));
+            outlineVerts.push_back(V(poly3d[i], normals3d[i], sideA, 1.f, -1.f));
+            outlineVerts.push_back(V(poly3d[j], normals3d[j], sideB, 1.f, +1.f));
+            outlineVerts.push_back(V(poly3d[j], normals3d[j], sideB, 1.f, -1.f));
         }
     }
 
     std::cout << "Crack outline: " << clusters.size() << " merged clusters, "
-              << outlineVerts.size() / 2 << " line segments.\n";
+              << outlineVerts.size() / 18 << " wall segments.\n";
+    return longestAxis;
 }
 
 int buildBackprojectionRays(const std::vector<ArucoDetection>& dets,

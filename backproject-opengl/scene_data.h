@@ -18,6 +18,18 @@ struct Vertex {
     glm::vec3 col;
 };
 
+/// Outline vertex for the 3D extruded wall.
+/// The shader computes:
+///   displaced = pos + normal * bump * height + side * thickness * sideOff
+struct OutlineVertex {
+    glm::vec3 pos;       ///< base position on mesh surface
+    glm::vec3 normal;    ///< surface normal (for height extrusion)
+    glm::vec3 side;      ///< perpendicular to segment on mesh surface (for width)
+    glm::vec3 col;
+    float     height;    ///< 0.0 = on mesh surface, 1.0 = at bump tip
+    float     sideOff;   ///< -1.0 or +1.0 (left/right side of ribbon)
+};
+
 /// Vertex for mesh triangles (pos + normal + UV).
 struct MeshVertex {
     glm::vec3 pos;

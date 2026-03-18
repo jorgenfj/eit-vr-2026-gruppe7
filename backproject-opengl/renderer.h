@@ -32,7 +32,9 @@ struct UIState {
     bool  showOutline      = true;
     float outlineColor[3]  = {1.0f, 0.0f, 0.0f}; // RGB
     float outlineAlpha     = 1.0f;
-    float outlineThickness = 3.0f;
+    float outlineThickness = 0.002f;  ///< width multiplier (fraction of longest axis)
+    float outlineBump      = 0.005f;  ///< height multiplier (fraction of longest axis)
+    float outlineBumpScale = 1.0f;    ///< longest axis of hit-point bounding box (set after outline build)
 
     // Save
     bool  saveRequested = false;   ///< set true by Save button, cleared by main loop
@@ -52,6 +54,9 @@ struct GpuMesh {
 };
 GpuMesh uploadLines(const std::vector<Vertex>& verts);
 
+/// Upload outline geometry (pos + normal + col) to the GPU.
+GpuMesh uploadOutlineLines(const std::vector<OutlineVertex>& verts);
+
 /// Upload textured triangle mesh to the GPU.
 GpuMesh uploadTriangles(const std::vector<MeshVertex>& verts);
 
@@ -65,14 +70,18 @@ GLuint createProgram();
 /// Compile + link the textured+lit shader (for mesh triangles).
 GLuint createMeshProgram();
 
+/// Compile + link the outline shader (lines with normal-bump displacement).
+GLuint createOutlineProgram();
+
 /// All GPU handles needed for rendering.
 struct RenderData {
     GpuMesh lines;
     GpuMesh triangles;
     GpuMesh rays;           ///< backprojection rays (GL_LINES)
-    GpuMesh outline;        ///< crack mask outline (GL_LINES)
+    GpuMesh outline;        ///< crack mask outline (GL_LINES, uses OutlineVertex)
     GLuint  lineProg    = 0;
     GLuint  meshProg    = 0;
+    GLuint  outlineProg = 0;  ///< outline shader with normal-bump displacement
     GLuint  diffuseTex  = 0;
 };
 

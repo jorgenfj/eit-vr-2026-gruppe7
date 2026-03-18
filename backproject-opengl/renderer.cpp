@@ -81,6 +81,40 @@ void main() {
 }
 )";
 
+// ── Outline shader (line with normal-bump displacement) ─────────────────────
+static const char* outlineVertSrc = R"(
+#version 330 core
+layout(location = 0) in vec3  aPos;
+layout(location = 1) in vec3  aNormal;
+layout(location = 2) in vec3  aSide;
+layout(location = 3) in vec3  aCol;
+layout(location = 4) in float aHeight;
+layout(location = 5) in float aSideOff;
+uniform mat4  uMVP;
+uniform float uBump;
+uniform float uThickness;
+out vec3 vCol;
+void main() {
+    vec3 displaced = aPos
+                   + aNormal * uBump * aHeight
+                   + aSide   * uThickness * aSideOff;
+    gl_Position = uMVP * vec4(displaced, 1.0);
+    vCol = aCol;
+}
+)";
+
+static const char* outlineFragSrc = R"(
+#version 330 core
+in  vec3 vCol;
+out vec4 FragColor;
+uniform float uAlpha;
+uniform vec3  uColorOverride;
+void main() {
+    vec3 col = (uColorOverride.r > -0.5) ? uColorOverride : vCol;
+    FragColor = vec4(col, uAlpha);
+}
+)";
+
 // ── Global orbit camera ─────────────────────────────────────────────────────
 static OrbitCamera gCam;
 static UIState gUI;
@@ -190,6 +224,18 @@ GLuint createMeshProgram() {
     return prog;
 }
 
+GLuint createOutlineProgram() {
+    GLuint vs  = compileShader(GL_VERTEX_SHADER, outlineVertSrc);
+    GLuint fs  = compileShader(GL_FRAGMENT_SHADER, outlineFragSrc);
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return prog;
+}
+
 // ── Window creation ─────────────────────────────────────────────────────────
 GLFWwindow* initWindow(int width, int height, const char* title) {
     if (!glfwInit()) {
@@ -257,6 +303,48 @@ GpuMesh uploadLines(const std::vector<Vertex>& verts) {
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                           (void*)offsetof(Vertex, col));
+
+    return m;
+}
+
+// ── Outline GPU upload (pos + normal + col) ─────────────────────────────────
+GpuMesh uploadOutlineLines(const std::vector<OutlineVertex>& verts) {
+    GpuMesh m;
+    m.vertexCount = (GLsizei)verts.size();
+    if (verts.empty()) return m;
+
+    glGenVertexArrays(1, &m.vao);
+    glGenBuffers(1, &m.vbo);
+    glBindVertexArray(m.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m.vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 verts.size() * sizeof(OutlineVertex),
+                 verts.data(), GL_STATIC_DRAW);
+
+    // pos     (location = 0)
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(OutlineVertex),
+                          (void*)offsetof(OutlineVertex, pos));
+    // normal  (location = 1)
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(OutlineVertex),
+                          (void*)offsetof(OutlineVertex, normal));
+    // side    (location = 2)
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(OutlineVertex),
+                          (void*)offsetof(OutlineVertex, side));
+    // col     (location = 3)
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(OutlineVertex),
+                          (void*)offsetof(OutlineVertex, col));
+    // height  (location = 4)
+    glEnableVertexAttribArray(4);
+    glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, sizeof(OutlineVertex),
+                          (void*)offsetof(OutlineVertex, height));
+    // sideOff (location = 5)
+    glEnableVertexAttribArray(5);
+    glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, sizeof(OutlineVertex),
+                          (void*)offsetof(OutlineVertex, sideOff));
 
     return m;
 }
@@ -354,6 +442,11 @@ static GLint gMeshModelLoc  = -1;
 static GLint gMeshLightLoc  = -1;
 static GLint gMeshViewLoc   = -1;
 static GLint gMeshTexLoc    = -1;
+static GLint gOutlineMvpLoc       = -1;
+static GLint gOutlineBumpLoc      = -1;
+static GLint gOutlineThicknessLoc = -1;
+static GLint gOutlineAlphaLoc     = -1;
+static GLint gOutlineColorLoc     = -1;
 static glm::vec3 gLightDir;
 
 static void initGlState(const RenderData& rd) {
@@ -366,6 +459,11 @@ static void initGlState(const RenderData& rd) {
     gMeshLightLoc = glGetUniformLocation(rd.meshProg,  "uLightDir");
     gMeshViewLoc  = glGetUniformLocation(rd.meshProg,  "uViewPos");
     gMeshTexLoc   = glGetUniformLocation(rd.meshProg,  "uDiffuse");
+    gOutlineMvpLoc       = glGetUniformLocation(rd.outlineProg, "uMVP");
+    gOutlineBumpLoc      = glGetUniformLocation(rd.outlineProg, "uBump");
+    gOutlineThicknessLoc = glGetUniformLocation(rd.outlineProg, "uThickness");
+    gOutlineAlphaLoc     = glGetUniformLocation(rd.outlineProg, "uAlpha");
+    gOutlineColorLoc     = glGetUniformLocation(rd.outlineProg, "uColorOverride");
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_MULTISAMPLE);
     glEnable(GL_BLEND);
@@ -402,7 +500,8 @@ bool renderFrame(GLFWwindow* window, const RenderData& rd) {
         ImGui::Checkbox("Show Outline (M)", &gUI.showOutline);
         ImGui::ColorEdit3("Outline Color", gUI.outlineColor);
         ImGui::SliderFloat("Outline Opacity", &gUI.outlineAlpha, 0.0f, 1.0f);
-        ImGui::SliderFloat("Outline Thickness", &gUI.outlineThickness, 1.0f, 10.0f);
+        ImGui::SliderFloat("Outline Width", &gUI.outlineThickness, 0.0f, 0.02f, "%.4f");
+        ImGui::SliderFloat("Outline Height", &gUI.outlineBump, 0.0f, 0.05f, "%.4f");
     }
 
     ImGui::Separator();
@@ -463,19 +562,26 @@ bool renderFrame(GLFWwindow* window, const RenderData& rd) {
         glLineWidth(1.5f);
     }
 
-    // ── Draw crack outline (toggle with M, color/alpha/thickness from UI) ─
+    // ── Draw crack outline wall (toggle with M, color/alpha/bump from UI) ──
     if (gUI.showOutline && rd.outline.vertexCount > 0) {
-        glLineWidth(gUI.outlineThickness);
-        // Slight depth offset so outline sits on top of mesh
-        glEnable(GL_POLYGON_OFFSET_LINE);
+        glUseProgram(rd.outlineProg);
+        // Depth offset so base sits flush with mesh
+        glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(-1.f, -1.f);
-        if (gLineAlphaLoc != -1) glUniform1f(gLineAlphaLoc, gUI.outlineAlpha);
+        // Two-sided so the wall is visible from any angle
+        glDisable(GL_CULL_FACE);
+        glUniformMatrix4fv(gOutlineMvpLoc, 1, GL_FALSE, glm::value_ptr(mvp));
+        float actualBump      = gUI.outlineBump      * gUI.outlineBumpScale;
+        float actualThickness = gUI.outlineThickness  * gUI.outlineBumpScale;
+        if (gOutlineBumpLoc      != -1) glUniform1f(gOutlineBumpLoc, actualBump);
+        if (gOutlineThicknessLoc != -1) glUniform1f(gOutlineThicknessLoc, actualThickness);
+        if (gOutlineAlphaLoc != -1) glUniform1f(gOutlineAlphaLoc, gUI.outlineAlpha);
         glm::vec3 oc(gUI.outlineColor[0], gUI.outlineColor[1], gUI.outlineColor[2]);
-        if (gLineColorLoc != -1) glUniform3fv(gLineColorLoc, 1, glm::value_ptr(oc));
+        if (gOutlineColorLoc != -1) glUniform3fv(gOutlineColorLoc, 1, glm::value_ptr(oc));
         glBindVertexArray(rd.outline.vao);
-        glDrawArrays(GL_LINES, 0, rd.outline.vertexCount);
-        glDisable(GL_POLYGON_OFFSET_LINE);
-        glLineWidth(1.5f);
+        glDrawArrays(GL_TRIANGLES, 0, rd.outline.vertexCount);
+        glDisable(GL_POLYGON_OFFSET_FILL);
+        glEnable(GL_CULL_FACE);
     }
 
     // ── Render ImGui on top ───────────────────────────────────────────────

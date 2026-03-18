@@ -128,9 +128,10 @@ int main(int argc, char* argv[])
     rd.lines     = uploadLines(lineVerts);
     rd.triangles = uploadTriangles(scene.meshTriangles);
     rd.rays      = uploadLines({});   // empty for now
-    rd.outline   = uploadLines({});   // empty for now
+    rd.outline   = uploadOutlineLines({});   // empty for now
     rd.lineProg  = createProgram();
     rd.meshProg  = createMeshProgram();
+    rd.outlineProg = createOutlineProgram();
 
     if (!scene.texturePath.empty())
         rd.diffuseTex = loadTextureFromFile(scene.texturePath);
@@ -138,8 +139,8 @@ int main(int argc, char* argv[])
     // ── Run render loop ───────────────────────────────────────────────────
     // Once the background thread finishes we re-upload the ray VBO.
     bool raysUploaded = false;
-    std::vector<Vertex> savedRayVerts;      // kept for FBX export
-    std::vector<Vertex> savedOutlineVerts;  // kept for FBX export
+    std::vector<Vertex> savedRayVerts;              // kept for FBX export
+    std::vector<OutlineVertex> savedOutlineVerts;   // kept for FBX export
 
     while (!glfwWindowShouldClose(window)) {
         // Check if ray casting has finished
@@ -158,14 +159,15 @@ int main(int argc, char* argv[])
             savedRayVerts = std::move(result.rays);
 
             // Build and upload crack outline
-            std::vector<Vertex> outlineVerts;
-            buildCrackOutline(result.hitPoints, outlineVerts);
+            std::vector<OutlineVertex> outlineVerts;
+            float longestAxis = buildCrackOutline(result.hitPoints, outlineVerts);
+            uiState().outlineBumpScale = longestAxis;
             std::cout << "Uploading " << outlineVerts.size() / 2 << " outline segments to GPU.\n";
             if (rd.outline.vbo) {
                 glDeleteBuffers(1, &rd.outline.vbo);
                 glDeleteVertexArrays(1, &rd.outline.vao);
             }
-            rd.outline = uploadLines(outlineVerts);
+            rd.outline = uploadOutlineLines(outlineVerts);
             savedOutlineVerts = std::move(outlineVerts);
 
             raysUploaded = true;
@@ -179,9 +181,20 @@ int main(int argc, char* argv[])
                 std::string outPath = resDir + "backprojected.fbx";
                 glm::vec3 rc(ui.rayColor[0], ui.rayColor[1], ui.rayColor[2]);
                 glm::vec3 oc(ui.outlineColor[0], ui.outlineColor[1], ui.outlineColor[2]);
+                // Bake bump + thickness into outline vertices for export
+                float bump      = ui.outlineBump      * ui.outlineBumpScale;
+                float thickness = ui.outlineThickness  * ui.outlineBumpScale;
+                std::vector<Vertex> exportOutline;
+                exportOutline.reserve(savedOutlineVerts.size());
+                for (const auto& v : savedOutlineVerts) {
+                    glm::vec3 p = v.pos
+                                + v.normal * bump * v.height
+                                + v.side   * thickness * v.sideOff;
+                    exportOutline.push_back({p, v.col});
+                }
                 exportSceneFbx(fbxPath, outPath,
                                savedRayVerts, rc, ui.rayAlpha,
-                               savedOutlineVerts, oc, ui.outlineAlpha,
+                               exportOutline, oc, ui.outlineAlpha,
                                meshScale);
             } else {
                 std::cout << "Cannot save yet — ray casting still in progress.\n";

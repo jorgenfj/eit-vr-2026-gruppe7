@@ -91,6 +91,50 @@ static aiMesh* buildLineMesh(const std::vector<Vertex>& lineVerts,
     return mesh;
 }
 
+// ── Helper: build a triangle mesh directly from vertex triples ───────────────
+static aiMesh* buildTriMesh(const std::vector<Vertex>& triVerts,
+                            const char* name,
+                            unsigned materialIndex)
+{
+    size_t numTris = triVerts.size() / 3;
+    if (numTris == 0) return nullptr;
+
+    aiMesh* mesh = new aiMesh();
+    mesh->mName = aiString(name);
+    mesh->mMaterialIndex = materialIndex;
+    mesh->mPrimitiveTypes = aiPrimitiveType_TRIANGLE;
+
+    mesh->mNumVertices = (unsigned)triVerts.size();
+    mesh->mVertices = new aiVector3D[mesh->mNumVertices];
+    mesh->mNormals  = new aiVector3D[mesh->mNumVertices];
+
+    mesh->mNumFaces = (unsigned)numTris;
+    mesh->mFaces = new aiFace[mesh->mNumFaces];
+
+    for (size_t t = 0; t < numTris; ++t) {
+        unsigned base = (unsigned)(t * 3);
+        const glm::vec3& a = triVerts[base + 0].pos;
+        const glm::vec3& b = triVerts[base + 1].pos;
+        const glm::vec3& c = triVerts[base + 2].pos;
+
+        mesh->mVertices[base + 0] = aiVector3D(a.x, a.y, a.z);
+        mesh->mVertices[base + 1] = aiVector3D(b.x, b.y, b.z);
+        mesh->mVertices[base + 2] = aiVector3D(c.x, c.y, c.z);
+
+        glm::vec3 n = glm::normalize(glm::cross(b - a, c - a));
+        for (int i = 0; i < 3; ++i)
+            mesh->mNormals[base + i] = aiVector3D(n.x, n.y, n.z);
+
+        mesh->mFaces[t].mNumIndices = 3;
+        mesh->mFaces[t].mIndices = new unsigned[3];
+        mesh->mFaces[t].mIndices[0] = base + 0;
+        mesh->mFaces[t].mIndices[1] = base + 1;
+        mesh->mFaces[t].mIndices[2] = base + 2;
+    }
+
+    return mesh;
+}
+
 // ── Helper: create a simple material with color + opacity ───────────────────
 
 static aiMaterial* buildColorMaterial(const char* name,
@@ -214,8 +258,7 @@ bool exportSceneFbx(const std::string& originalFbxPath,
     if (hasOutline) {
         scene->mMaterials[nextMatIdx] = buildColorMaterial(
             "CrackOutline_Material", outlineColor, outlineAlpha);
-        aiMesh* m = buildLineMesh(scaledOutlineVerts, "CrackOutline", nextMatIdx,
-                                  0.5f * invScale);
+        aiMesh* m = buildTriMesh(scaledOutlineVerts, "CrackOutline", nextMatIdx);
         scene->mMeshes[nextMeshIdx] = m;
         outlineMeshIdx = nextMeshIdx;
         ++nextMeshIdx;
